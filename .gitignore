@@ -1,0 +1,18 @@
+# 에디터가 만드는 것 — 패키지 저장소에는 들어갈 일이 없다
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Ll]ogs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vs/
+.idea/
+.vscode/
+*.csproj
+*.sln
+*.user
