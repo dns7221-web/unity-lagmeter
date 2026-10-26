@@ -68,7 +68,14 @@ namespace DHS.Diagnostics
         private const int GraphHeight = 64;      // 그래프 텍스처 높이(픽셀)
         private const int WarmupFrames = 60;     // 시작 직후(로딩 끝물)는 튄 프레임으로 안 센다
         private const int SpikeRingLength = 32;  // 화면용으로 기억하는 최근 렉 수
-        private const string SelfMarkerName = "LagMeter.Self";
+        // 수정 (2026-10-26) — 자기 비용을 Update와 OnGUI로 갈랐다.
+        //
+        // 전에는 둘을 "LagMeter.Self" 하나로 묶어 쟀는데, 첫 실측에서 매 프레임 0.66ms
+        // (최고 26.28ms)가 나왔음에도 <b>어느 쪽이 범인인지 알 수가 없었다.</b> Update에는
+        // 텍스처 업로드가 있고 OnGUI에는 GUI.Label이 수십 개 있어 성질이 전혀 다르다.
+        // 가르지 않으면 추측으로 고치게 되고, 그건 이 도구의 존재 이유와 반대다.
+        private const string SelfUpdateMarkerName = "LagMeter.Update";
+        private const string SelfGuiMarkerName = "LagMeter.OnGUI";
         private const string VisiblePrefKey = "DHS.LagMeter.Visible";
         // 추가 생성 (2026-10-23)
         /// <summary>메뉴로 켜고 끄는 "Play 시작부터 녹화" 설정 키. PlayerPrefs라 Play마다 유지된다.
@@ -76,6 +83,8 @@ namespace DHS.Diagnostics
         public const string RecordFromStartPrefKey = "DHS.LagMeter.RecordFromStart";
         private const int AwaySkipFrames = 2;     // 창 밖에 나갈 때·돌아올 때 기록에서 빼는 프레임 수
         private const int MissingRetryLimit = 10; // 시작 때 못 찾은 내장 항목을 다시 찾아보는 횟수(1초마다)
+        // 추가 생성 (2026-10-26) — 그래프 텍스처를 GPU로 올리는 최소 간격(초). 30번/초면 눈에 매끈하다.
+        private const float GraphApplyInterval = 1f / 30f;
 
         private const string Green = "#5fe07a", Yellow = "#ffd23f", Red = "#ff5a5a", Grey = "#9aa0a6";
         private static readonly Color32 s_goodColor = new Color32(95, 224, 122, 255);   // 60fps 이상
@@ -86,7 +95,8 @@ namespace DHS.Diagnostics
         private static readonly Color32 s_clearColor = new Color32(0, 0, 0, 0);
 
         /// <summary>렉 미터 자신의 비용 — 표의 "렉 미터 자체" 줄. 도구가 무거우면 바로 보이게.</summary>
-        private static readonly ProfilerMarker s_selfMarker = new ProfilerMarker(SelfMarkerName);
+        private static readonly ProfilerMarker s_selfUpdateMarker = new ProfilerMarker(SelfUpdateMarkerName);
+        private static readonly ProfilerMarker s_selfGuiMarker = new ProfilerMarker(SelfGuiMarkerName);
 
         /// <summary>한 줄이 재는 값의 종류.</summary>
         private enum Kind
@@ -109,6 +119,10 @@ namespace DHS.Diagnostics
             public string UsedName;           // 실제로 찾은 이름(CSV 머리글)
             public ProfilerRecorder Recorder;
             public bool Missing;              // 유니티 내장 항목인데 이 버전에서 이름을 못 찾음 → "측정 안 됨"
+            // 추가 생성 (2026-10-26) — 프로젝트가 넘긴 값 읽기. null이 아니면 Recorder 대신 이걸 쓴다.
+            // 프로파일러에 없는 값(예: 은폐 위반 횟수)을 같은 표·같은 CSV에 싣기 위한 것.
+            public Func<float> Read;
+            public string Format;             // 값 줄 표시 형식. null이면 "0"
             public readonly float[] History = new float[HistoryLength];
             public float Now, Avg, Max;
 
@@ -143,6 +157,8 @@ namespace DHS.Diagnostics
         private AvgComparer _avgComparer;
         private readonly List<int> _tableOrder = new List<int>();
         private int _gcRow = -1, _gcAllocRow = -1, _batchRow = -1, _setPassRow = -1;
+        // 추가 생성 (2026-10-26) — 프로젝트 카운터 줄 번호(아래 줄에 표시할 것). LinkRows가 채운다.
+        private readonly List<int> _counterRows = new List<int>();
         private ProfilerRecorder _mainThread;
         private float _mainThreadMs;
         // 추가 생성 (2026-10-23) — 마커 목록 훑기용(다시 찾을 때 리스트를 새로 만들지 않게)과 다시 찾은 횟수
@@ -173,6 +189,7 @@ namespace DHS.Diagnostics
         private GUIStyle _left, _right;
         private float _styleScale;
         private float _nextText, _nextRetry;
+        private float _nextGraphApply;   // 추가 생성 (2026-10-26) — 그래프 업로드 간격 제한
         private readonly StringBuilder _sb = new StringBuilder(512);
         // 수정 (2026-10-23): 표를 열마다 한 덩어리 글자로 그리던 것을 칸마다 따로 그리게 바꿨다 — 한글 열과 숫자 열의
         // 줄 높이가 달라 아래로 갈수록 이름과 숫자가 어긋났기 때문. 칸 글자를 줄 순서대로 담아 둔다.
@@ -180,6 +197,8 @@ namespace DHS.Diagnostics
                                       _cellAvgs = new List<string>(), _cellMaxs = new List<string>();
         private string _headLeft = "", _headRight = "", _spikeText = "", _footer = "", _hint = "";
         private int _tableLines = 1;
+        private int _footerLines = 2;   // 추가 생성 (2026-10-26) — 프로젝트 카운터가 있으면 3줄
+
         private float _rowHeight; // 추가 생성 (2026-10-23) — 한글이 들어간 한 줄의 실제 높이. 모든 줄을 이 높이로 그린다
         private string _savedNotice;
         private float _savedNoticeUntil;
@@ -217,6 +236,24 @@ namespace DHS.Diagnostics
 
         private static readonly List<ProjectRow> s_projectRows = new List<ProjectRow>();
 
+        // 추가 생성 (2026-10-26) — 프로파일러에 없는 프로젝트 값(카운터).
+        //
+        // ProfilerMarker로는 "이 구간이 몇 ms냐"만 잴 수 있다. 그런데 프로젝트가 들고 있는
+        // <b>숫자</b>를 녹화에 남기고 싶은 경우가 있다 — 호러 게임의 "은폐 위반 횟수"가 그렇다.
+        // 그 값은 화면에 실시간으로만 보이고 CSV에 안 들어가서, 15칸 걷고 나서 "위반 0회였다"를
+        // 파일로 증명할 수가 없었다. 그게 그 포폴에서 제일 중요한 숫자인데도.
+        private readonly struct ProjectCounter
+        {
+            public readonly string Key, Label, Format;
+            public readonly Func<float> Read;
+            public ProjectCounter(string key, string label, Func<float> read, string format)
+            {
+                Key = key; Label = label; Read = read; Format = format;
+            }
+        }
+
+        private static readonly List<ProjectCounter> s_projectCounters = new List<ProjectCounter>();
+
         /// <summary>
         /// 프로젝트 코드의 <see cref="ProfilerMarker"/> 하나를 표에 추가한다.
         ///
@@ -243,6 +280,31 @@ namespace DHS.Diagnostics
             s_projectRows.Add(new ProjectRow(markerName, label, parentMarker));
         }
 
+        /// <summary>
+        /// 프로젝트가 들고 있는 <b>숫자</b> 하나를 표 아래 줄과 녹화 CSV에 싣는다 (추가 생성 2026-10-26).
+        ///
+        /// <see cref="RegisterMarker"/>가 "이 구간이 몇 ms냐"를 재는 것이라면, 이쪽은 프로파일러가
+        /// 모르는 값을 끼워 넣는 것이다 — 위반 횟수, 좌표, 진행도처럼 <b>프로젝트만 아는 수</b>.
+        /// <see cref="RegisterMarker"/>와 같은 이유로 <c>BeforeSceneLoad</c>에서 부르면 된다.
+        ///
+        /// <paramref name="read"/>는 <b>매 프레임</b> 불린다. 싸야 하고(필드 하나 읽기 수준),
+        /// 예외를 던지지 않아야 한다 — 측정 도구가 게임을 멈추게 하면 안 되므로 던지면 그 줄을 끈다.
+        /// 대상이 아직 씬에 없을 수 있으니(null) 람다 안에서 확인하고 0을 돌려주는 식으로 쓸 것.
+        /// </summary>
+        /// <param name="key">CSV 머리글에 쓸 이름. 예: "CoverageViolations"</param>
+        /// <param name="label">화면에 보일 한국어 이름</param>
+        /// <param name="read">값을 읽는 함수. 매 프레임 불린다</param>
+        /// <param name="format">표시 형식(기본 "0")</param>
+        public static void RegisterCounter(string key, string label, Func<float> read, string format = "0")
+        {
+            if (string.IsNullOrEmpty(key) || read == null) return;
+
+            for (int i = 0; i < s_projectCounters.Count; i++)
+                if (s_projectCounters[i].Key == key) return;   // 도메인 리로드로 두 번 등록되는 것 방지
+
+            s_projectCounters.Add(new ProjectCounter(key, label, read, format));
+        }
+
         /// <summary>내장 항목 + 등록된 프로젝트 항목. 프로젝트 항목은 <b>언제나 Custom</b>이다(처음 쓰일 때 등록되므로).</summary>
         private static List<Row> CreateRows()
         {
@@ -250,6 +312,12 @@ namespace DHS.Diagnostics
 
             foreach (ProjectRow p in s_projectRows)
                 rows.Add(new Row(p.Label, Kind.Time, p.Marker) { ParentName = p.ParentMarker, Custom = true });
+
+            // 추가 생성 (2026-10-26) — 프로젝트 카운터. Recorder가 아니라 Read로 값을 얻는다.
+            // UsedName을 여기서 채워 두는 이유: CSV 머리글이 UsedName을 쓰는데, 이 줄들은
+            // 프로파일러에서 이름을 "찾는" 과정이 없어 아무도 채워주지 않는다.
+            foreach (ProjectCounter c in s_projectCounters)
+                rows.Add(new Row(c.Label, Kind.Count, c.Key) { Read = c.Read, Format = c.Format, UsedName = c.Key });
 
             // "렉 미터 자체"와 아래쪽 값 줄(GC·배치)은 표의 맨 끝에 와야 읽기 좋아서, 프로젝트 항목을
             // 그 앞에 끼워 넣는 대신 뒤에 붙이고 표 정렬(평균 큰 순)이 알아서 자리를 잡게 둔다.
@@ -271,7 +339,8 @@ namespace DHS.Diagnostics
             new Row("GPU 기다림", Kind.Time, "Gfx.WaitForPresentOnGfxThread", "Gfx.WaitForPresent"),
             new Row("GC 수거", Kind.Time, "GC.Collect"),
             new Row("에디터(빌드엔 없음)", Kind.Time, "EditorLoop"),
-            new Row("렉 미터 자체", Kind.Time, SelfMarkerName) { Custom = true, CanBlame = false },
+            new Row("렉 미터 — Update", Kind.Time, SelfUpdateMarkerName) { Custom = true, CanBlame = false },
+            new Row("렉 미터 — OnGUI", Kind.Time, SelfGuiMarkerName) { Custom = true, CanBlame = false },
             new Row("GC 할당", Kind.Bytes, "GC Allocated In Frame"),
             new Row("배치", Kind.Count, "Batches Count"),
             new Row("SetPass", Kind.Count, "SetPass Calls Count"),
@@ -299,7 +368,9 @@ namespace DHS.Diagnostics
             _rows = CreateRows();
             _avgComparer = new AvgComparer(_rows);
             LinkRows();
-            using (s_selfMarker.Auto()) { } // 우리 마커를 지금 써 둬서 아래 목록 찾기에 확실히 잡히게 한다
+            // 우리 마커를 지금 한 번 써 둬서 아래 목록 찾기에 확실히 잡히게 한다 (둘 다)
+            using (s_selfUpdateMarker.Auto()) { }
+            using (s_selfGuiMarker.Auto()) { }
             ResolveRecorders();
 
             _graph = new Texture2D(HistoryLength, GraphHeight, TextureFormat.RGBA32, false)
@@ -337,17 +408,26 @@ namespace DHS.Diagnostics
         /// </summary>
         private void Update()
         {
-            using (s_selfMarker.Auto())
+            using (s_selfUpdateMarker.Auto())
             {
                 HandleKeys();
                 Sample();
-                if (_graphDirty)
+
+                float now = Time.unscaledTime;
+
+                // 수정 (2026-10-26) — 그래프 텍스처를 매 프레임 올리지 않는다.
+                //
+                // Sample()은 프레임마다 그래프의 <b>한 칸</b>(64픽셀)만 고치는데, Apply()는
+                // 텍스처 <b>전체</b>(300×64 RGBA ≈ 77KB)를 GPU로 올린다. 155fps면 1초에
+                // 155번, 12MB/초를 올리고 있었다 — 눈은 30번과 155번을 구분하지 못한다.
+                // 늦게 올라간 칸은 다음 업로드에 같이 실려 그림은 그대로다.
+                if (_graphDirty && now >= _nextGraphApply)
                 {
+                    _nextGraphApply = now + GraphApplyInterval;
                     _graph.Apply(false);
                     _graphDirty = false;
                 }
 
-                float now = Time.unscaledTime;
                 if (now >= _nextRetry)
                 {
                     _nextRetry = now + 1f;
@@ -367,11 +447,13 @@ namespace DHS.Diagnostics
         /// <summary>ParentName을 줄 번호로 바꾸고, 아래 GC·그리기 줄 번호를 챙겨 둔다.</summary>
         private void LinkRows()
         {
+            _counterRows.Clear();   // 추가 생성 (2026-10-26)
             for (int i = 0; i < _rows.Count; i++)
             {
                 Row row = _rows[i];
                 if (row.ParentName != null)
                     row.Parent = _rows.FindIndex(r => Array.IndexOf(r.Names, row.ParentName) >= 0);
+                if (row.Read != null) _counterRows.Add(i);   // 추가 생성 (2026-10-26) — 아래 줄에 표시할 것들
                 if (row.Names[0] == "GC.Collect") _gcRow = i;
                 else if (row.Names[0] == "GC Allocated In Frame") _gcAllocRow = i;
                 else if (row.Names[0] == "Batches Count") _batchRow = i;
@@ -402,7 +484,9 @@ namespace DHS.Diagnostics
                 // 유니티 내장 항목은 Play 시작 때 이미 다 등록돼 있다 — 여기서 못 찾으면 이 버전엔 없는 이름이다.
                 // 수정 (2026-10-23): URP 렌더링 마커처럼 처음 그릴 때 등록되는 내장 항목도 있어서,
                 // 못 찾은 줄은 RetryMissingRows가 몇 번 더 찾아본다. 그래도 없으면 "측정 안 됨"으로 남는다.
-                row.Missing = !row.Recorder.Valid && !row.Custom;
+                // 수정 (2026-10-26): row.Read != null(프로젝트 카운터)을 먼저 걸러낸다. 안 그러면
+                // Recorder가 없고 Custom도 아니라서 "측정 안 됨"으로 표시되고 값이 안 들어간다.
+                row.Missing = row.Read == null && !row.Recorder.Valid && !row.Custom;
             }
         }
 
@@ -429,6 +513,10 @@ namespace DHS.Diagnostics
         /// <summary>줄의 이름 후보를 앞에서부터 보며, 처음 열리는 레코더를 그 줄에 붙인다. 붙였으면 true.</summary>
         private static bool TryOpenRow(Row row, Dictionary<string, ProfilerCategory> found)
         {
+            // 추가 생성 (2026-10-26) — 프로젝트 카운터는 프로파일러에 없는 값이라 찾을 것이 없다.
+            // 여기서 걸러내지 않으면 "측정 안 됨"으로 표시되고 값도 안 들어간다.
+            if (row.Read != null) return true;
+
             foreach (string name in row.Names)
             {
                 if (!found.TryGetValue(name, out ProfilerCategory category)) continue;
@@ -481,6 +569,7 @@ namespace DHS.Diagnostics
         {
             foreach (Row row in _rows)
             {
+                if (row.Read != null) continue;   // 추가 생성 (2026-10-26) — 카운터는 찾을 것이 없다
                 if (!row.Custom || row.Recorder.Valid) continue;
                 try
                 {
@@ -519,7 +608,19 @@ namespace DHS.Diagnostics
             {
                 Row row = _rows[i];
                 float value = 0f;
-                if (row.Recorder.Valid)
+                // 추가 생성 (2026-10-26) — 프로젝트 카운터는 프로파일러가 아니라 넘겨받은 함수에서 읽는다.
+                // 예외를 던지면 그 줄만 끈다 — 측정 도구가 게임을 멈추게 하면 안 된다.
+                if (row.Read != null)
+                {
+                    try { value = row.Read(); }
+                    catch (Exception e)
+                    {
+                        Debug.LogWarning($"[LagMeter] 카운터 '{row.Label}'가 예외를 던져 이 줄을 끕니다 — {e.GetType().Name}");
+                        row.Read = null;
+                        row.Missing = true;
+                    }
+                }
+                else if (row.Recorder.Valid)
                 {
                     long raw = row.Recorder.LastValue;
                     value = row.Kind == Kind.Time ? raw * 1e-6f      // 나노초 → ms
@@ -923,6 +1024,17 @@ namespace DHS.Diagnostics
                 _sb.Append("GC 할당 측정 안 됨");
             _sb.Append("   GC 수거 <color=").Append(gcCount > 0 ? Yellow : Green).Append('>').Append(gcCount).Append("번</color>\n");
             _sb.Append("그리기: 배치 ").Append(CountText(_batchRow)).Append(" · SetPass ").Append(CountText(_setPassRow));
+
+            // 추가 생성 (2026-10-26) — 프로젝트가 등록한 카운터를 같은 줄에 이어 붙인다.
+            // "지금 값"을 쓴다 — 위반 횟수처럼 누적되는 수는 평균이 아무 뜻이 없다.
+            for (int i = 0; i < _counterRows.Count; i++)
+            {
+                Row row = _rows[_counterRows[i]];
+                _sb.Append(i == 0 ? "\n" : "   ")
+                   .Append(row.Label).Append(' ')
+                   .Append(row.Now.ToString(row.Format ?? "0"));
+            }
+            _footerLines = _counterRows.Count > 0 ? 3 : 2;
             _footer = _sb.ToString();
 
             // 안내 줄
@@ -1035,7 +1147,7 @@ namespace DHS.Diagnostics
         private void OnGUI()
         {
             if (!_visible || Event.current.type != EventType.Repaint) return;
-            using (s_selfMarker.Auto())
+            using (s_selfGuiMarker.Auto())
             {
                 EnsureStyles();
                 float scale = _styleScale;
@@ -1044,7 +1156,10 @@ namespace DHS.Diagnostics
                 float gap = 4f * scale;
                 float width = 470f * scale;
                 float graphHeight = GraphHeight * scale;
-                const int SpikeLines = 2, FooterLines = 2;
+                // 수정 (2026-10-26): 아래 줄이 2줄 고정이었는데, 프로젝트 카운터가 등록되면
+                // 한 줄이 더 붙는다. 고정으로 두면 그 줄이 안내 줄과 겹친다.
+                const int SpikeLines = 2;
+                int FooterLines = _footerLines;
                 float height = pad * 2f + line * (1 + SpikeLines + _tableLines + FooterLines + 1) + graphHeight + gap * 4f;
 
                 var panel = new Rect(Screen.width - width - 10f, 10f, width, height);
