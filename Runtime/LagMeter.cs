@@ -68,7 +68,7 @@ namespace DHS.Diagnostics
         // 추가 생성 (2026-10-26)
         [Tooltip("표에 보일 맨 위 줄의 최대 개수. 표는 평균이 큰 순이라 아래쪽은 늘 0에 가깝다 — " +
                  "나머지는 '그 외 N줄' 한 줄로 접어 Label 수를 줄인다. 전부 보려면 크게 둘 것.")]
-        [Min(3)][SerializeField] private int maxTableRows = 9;
+        [Min(3)][SerializeField] private int maxTableRows = 5;
 
         [Header("녹화")]
         [Tooltip("한 번에 녹화할 최대 프레임 수. 넘으면 저절로 저장하고 멈춘다(60fps면 10분).")]

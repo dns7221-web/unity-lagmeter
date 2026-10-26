@@ -1,6 +1,6 @@
 {
   "name": "com.dhs.lagmeter",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "displayName": "렉 미터 (LagMeter)",
   "description": "Profiler 창을 열지 않고, Play 중 게임 화면에서 '렉이 났는지, 그때 뭐가 무거웠는지'를 본다. F8로 표시, F9로 프레임별 CSV 녹화. 유니티 내장 ProfilerRecorder로 재므로 빌드한 실행 파일 안에서도 숫자가 뜬다.",
   "unity": "6000.0",
