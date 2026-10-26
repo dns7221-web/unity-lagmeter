@@ -65,6 +65,10 @@ namespace DHS.Diagnostics
         [Min(10f)][SerializeField] private float graphMaxMs = 50f;
         [Tooltip("글자를 다시 만드는 간격(초). 매 프레임 만들면 이 도구가 쓰레기(GC)를 만들어 스스로 렉을 낸다.")]
         [Min(0.05f)][SerializeField] private float textRefresh = 0.25f;
+        // 추가 생성 (2026-10-26)
+        [Tooltip("표에 보일 맨 위 줄의 최대 개수. 표는 평균이 큰 순이라 아래쪽은 늘 0에 가깝다 — " +
+                 "나머지는 '그 외 N줄' 한 줄로 접어 Label 수를 줄인다. 전부 보려면 크게 둘 것.")]
+        [Min(3)][SerializeField] private int maxTableRows = 9;
 
         [Header("녹화")]
         [Tooltip("한 번에 녹화할 최대 프레임 수. 넘으면 저절로 저장하고 멈춘다(60fps면 10분).")]
@@ -192,16 +196,29 @@ namespace DHS.Diagnostics
         private Texture2D _graph, _panel;
         private readonly Color32[] _column = new Color32[GraphHeight];
         private bool _graphDirty;
-        private GUIStyle _left, _right;
+        private GUIStyle _left, _right, _rightPlain;   // _rightPlain: 숫자 칸(richText 끔) — 추가 생성 2026-10-26
         private float _styleScale;
         private float _nextText, _nextRetry;
         private float _nextGraphApply;   // 추가 생성 (2026-10-26) — 그래프 업로드 간격 제한
         private readonly StringBuilder _sb = new StringBuilder(512);
         // 수정 (2026-10-23): 표를 열마다 한 덩어리 글자로 그리던 것을 칸마다 따로 그리게 바꿨다 — 한글 열과 숫자 열의
         // 줄 높이가 달라 아래로 갈수록 이름과 숫자가 어긋났기 때문. 칸 글자를 줄 순서대로 담아 둔다.
-        private readonly List<string> _cellLabels = new List<string>(), _cellNows = new List<string>(),
-                                      _cellAvgs = new List<string>(), _cellMaxs = new List<string>();
-        private string _headLeft = "", _headRight = "", _spikeText = "", _footer = "", _hint = "";
+        // 수정 (2026-10-26) — string이 아니라 GUIContent를 들고 재사용한다.
+        //
+        // GUI.Label(Rect, string, GUIStyle)은 안에서 <b>GUIContent를 매번 새로 만든다.</b>
+        // 표가 16줄이면 한 프레임에 64개, 155fps면 1초에 1만 개다. 글자 자체는
+        // textRefresh(0.25초)마다만 바뀌는데 그릇을 매 프레임 새로 만들고 있었다.
+        // 그릇을 들고 있다가 text만 갈아끼우면 그 할당이 통째로 사라진다.
+        private readonly List<GUIContent> _cellLabels = new List<GUIContent>(), _cellNows = new List<GUIContent>(),
+                                          _cellAvgs = new List<GUIContent>(), _cellMaxs = new List<GUIContent>();
+        private int _cellCount;   // 이번에 실제로 쓰는 줄 수(리스트는 재사용하느라 더 길 수 있다)
+
+        // 머리·렉·아래·안내 줄도 같은 이유로 그릇을 들고 있는다.
+        private readonly GUIContent _headLeftContent = new GUIContent(), _headRightContent = new GUIContent(),
+                                    _spikeContent = new GUIContent(), _footerContent = new GUIContent(),
+                                    _hintContent = new GUIContent();
+        // (2026-10-26) 글자를 들고 있던 string 필드들은 없앴다 — 위의 GUIContent가 직접 들고 있다.
+        // string을 GUI.Label에 넘기면 그 안에서 GUIContent가 매번 새로 생기기 때문이다.
         private int _tableLines = 1;
         private int _footerLines = 2;   // 추가 생성 (2026-10-26) — 프로젝트 카운터가 있으면 3줄
 
@@ -919,7 +936,10 @@ namespace DHS.Diagnostics
             {
                 Row row = _rows[i];
                 string name = (row.Parent >= 0 ? "    └ " : "  ") + row.Label;
-                if (!row.Recorder.Valid)
+                // 수정 (2026-10-26): Read(프로젝트 카운터)를 같이 봐야 한다. Recorder.Valid만 보면
+                // 카운터는 프로파일러에 없으니 늘 "측정 안 됨"으로 적힌다 — CSV엔 값이 멀쩡히
+                // 들어가 있는데 요약만 틀리게 말하는 상태였다. 첫 녹화에서 실제로 그렇게 나왔다.
+                if (!row.Recorder.Valid && row.Read == null)
                 {
                     sb.AppendLine($"{name}: 측정 안 됨");
                     continue;
@@ -1032,12 +1052,12 @@ namespace DHS.Diagnostics
             float recentMs = recentSum / recent;
             float fps = recentMs > 0f ? 1000f / recentMs : 0f;
 
-            _headLeft = "<b>렉 미터</b>";
+            _headLeftContent.text = "<b>렉 미터</b>";
             _sb.Clear();
             _sb.Append("<color=").Append(fps >= 55f ? Green : fps >= 30f ? Yellow : Red).Append("><b>")
                .Append(fps.ToString("0")).Append("</b> FPS</color>   ").Append(recentMs.ToString("0.0")).Append(" ms");
             if (_mainThread.Valid) _sb.Append("   CPU ").Append(_mainThreadMs.ToString("0.0")).Append(" ms");
-            _headRight = _sb.ToString();
+            _headRightContent.text = _sb.ToString();
 
             // 렉 줄
             float now = Time.realtimeSinceStartup - _startTime;
@@ -1058,7 +1078,7 @@ namespace DHS.Diagnostics
                 _sb.Append("<color=#ff8a8a>마지막 렉</color> ").Append(last.Time.ToString("0.0")).Append("초 — ")
                    .Append(last.Ms.ToString("0.0")).Append(" ms   제일 컸던 것: ").Append(BlameText(last));
             }
-            _spikeText = _sb.ToString();
+            _spikeContent.text = _sb.ToString();
 
             BuildTable();
 
@@ -1087,7 +1107,7 @@ namespace DHS.Diagnostics
                    .Append(row.Now.ToString(row.Format ?? "0"));
             }
             _footerLines = _counterRows.Count > 0 ? 3 : 2;
-            _footer = _sb.ToString();
+            _footerContent.text = _sb.ToString();
 
             // 안내 줄
             if (_recording)
@@ -1095,15 +1115,15 @@ namespace DHS.Diagnostics
                 float t = Time.realtimeSinceStartup - _recStart;
                 // 수정 (2026-10-23): Play 시작부터 녹화 중이면 그렇다고 적는다.
                 string from = _recFromStart ? " (Play 시작부터)" : "";
-                _hint = $"<color={Red}>● 녹화 중{from} {(int)(t / 60f):00}:{(int)(t % 60f):00}</color>   {recordKey} 누르면 저장";
+                _hintContent.text = $"<color={Red}>● 녹화 중{from} {(int)(t / 60f):00}:{(int)(t % 60f):00}</color>   {recordKey} 누르면 저장";
             }
             else if (_savedNotice != null && Time.unscaledTime < _savedNoticeUntil)
-                _hint = $"<color={Green}>{_savedNotice}</color>";
+                _hintContent.text = $"<color={Green}>{_savedNotice}</color>";
             else
             {
                 // 수정 (2026-10-26): 스크린샷 키도 안내에 넣는다 — 키가 늘었는데 안내에 없으면 아무도 안 쓴다.
                 string shot = screenshotKey != Key.None ? $" · {screenshotKey} 화면 한 장" : "";
-                _hint = $"<color={Grey}>{toggleKey} 숨기기 · {recordKey} 녹화 시작(파일로 저장){shot}</color>";
+                _hintContent.text = $"<color={Grey}>{toggleKey} 숨기기 · {recordKey} 녹화 시작(파일로 저장){shot}</color>";
             }
         }
 
@@ -1123,18 +1143,42 @@ namespace DHS.Diagnostics
                 if (_rows[i].Kind == Kind.Time && _rows[i].Parent < 0 && !_rows[i].Missing) _tableOrder.Add(i);
             _tableOrder.Sort(_avgComparer);
 
-            _cellLabels.Clear();
-            _cellNows.Clear();
-            _cellAvgs.Clear();
-            _cellMaxs.Clear();
-            AddTableLine("<b>항목 (ms)</b>", "<b>이번</b>", "<b>평균</b>", "<b>최고</b>");
+            _cellCount = 0;   // 수정 (2026-10-26): 리스트를 비우지 않고 쓰는 만큼만 센다(그릇 재사용)
+            // 수정 (2026-10-26): 숫자 칸은 richText를 끈 스타일로 그리므로 <b> 태그를 쓰면 글자 그대로 나온다.
+            // 이름 칸은 색·굵기를 쓰니 그대로 둔다.
+            AddTableLine("<b>항목 (ms)</b>", "이번", "평균", "최고");
 
+            // 추가 생성 (2026-10-26) — 맨 위 줄을 maxTableRows개까지만 그리고 나머지는 한 줄로 접는다.
+            //
+            // 표는 이미 평균이 큰 순이라 <b>아래쪽은 늘 0에 가까운 줄</b>이다(GPU 기다림, 스크립트
+            // FixedUpdate/LateUpdate 등). 그걸 다 그리느라 한 프레임에 Label을 수십 개 더 쓰는데,
+            // 읽는 사람에게 주는 정보는 "여긴 아무 일도 없다"뿐이다. 접으면 Label도 줄고 표도 읽기 쉬워진다.
+            int shown = 0;
+            float foldedAvg = 0f;
+            int foldedLines = 0;
             foreach (int index in _tableOrder)
             {
+                bool hasChild = false;
+                for (int child = 0; child < _rows.Count && !hasChild; child++)
+                    if (_rows[child].Parent == index) hasChild = true;
+
+                // 자식이 달린 줄은 접지 않는다 — 우리 코드 항목이 통째로 사라지면 접기가 손해다.
+                if (shown >= maxTableRows && !hasChild)
+                {
+                    foldedAvg += _rows[index].Avg;
+                    foldedLines++;
+                    continue;
+                }
+
                 AppendTableRow(_rows[index], false);
+                shown++;
                 for (int child = 0; child < _rows.Count; child++)
                     if (_rows[child].Parent == index) AppendTableRow(_rows[child], true);
             }
+
+            if (foldedLines > 0)
+                AddTableLine($"<color={Grey}>그 외 {foldedLines}줄</color>", "", foldedAvg.ToString("0.0"), "");
+
             // 이 유니티 버전에 없는 항목은 맨 아래에 흐리게
             foreach (Row row in _rows)
             {
@@ -1142,17 +1186,27 @@ namespace DHS.Diagnostics
                 AddTableLine($"<color={Grey}>{row.Label} — 측정 안 됨</color>", "", "", "");
             }
 
-            _tableLines = _cellLabels.Count;
+            _tableLines = _cellCount;
         }
 
         // 추가 생성 (2026-10-23)
         /// <summary>표에 한 줄(네 칸)을 더한다.</summary>
         private void AddTableLine(string label, string now, string avg, string max)
         {
-            _cellLabels.Add(label);
-            _cellNows.Add(now);
-            _cellAvgs.Add(avg);
-            _cellMaxs.Add(max);
+            // 수정 (2026-10-26): 그릇을 새로 만들지 않고, 모자랄 때만 하나 늘리고 text만 갈아끼운다.
+            if (_cellCount == _cellLabels.Count)
+            {
+                _cellLabels.Add(new GUIContent());
+                _cellNows.Add(new GUIContent());
+                _cellAvgs.Add(new GUIContent());
+                _cellMaxs.Add(new GUIContent());
+            }
+
+            _cellLabels[_cellCount].text = label;
+            _cellNows[_cellCount].text = now;
+            _cellAvgs[_cellCount].text = avg;
+            _cellMaxs[_cellCount].text = max;
+            _cellCount++;
         }
 
         /// <summary>표 한 줄. 평균이 3 ms 넘으면 노랑, 8 ms 넘으면 빨강 — 60fps 한 프레임(16.7 ms)에서 차지하는 몫이 크다는 뜻.</summary>
@@ -1193,6 +1247,9 @@ namespace DHS.Diagnostics
             };
             _left.normal.textColor = new Color(0.92f, 0.93f, 0.95f);
             _right = new GUIStyle(_left) { alignment = TextAnchor.UpperRight };
+            // 추가 생성 (2026-10-26) — 숫자 칸 전용. 표의 Label 4개 중 3개가 이쪽이라,
+            // 태그 훑기를 건너뛰는 것만으로도 매 프레임 비용이 줄어든다.
+            _rightPlain = new GUIStyle(_right) { richText = false };
 
             // 추가 생성 (2026-10-23) — 한글은 기본 글꼴에 없어 대체 글꼴로 그려지고, 그 줄은 lineHeight보다 높다.
             // 한글이 든 한 줄을 실제로 재서 모든 줄 높이로 쓴다 — 표·렉 줄·아래 줄이 서로 겹치지 않게.
@@ -1222,8 +1279,8 @@ namespace DHS.Diagnostics
                 GUI.DrawTexture(panel, _panel);
 
                 float x = panel.x + pad, w = panel.width - pad * 2f, y = panel.y + pad;
-                GUI.Label(new Rect(x, y, w, line), _headLeft, _left);
-                GUI.Label(new Rect(x, y, w, line), _headRight, _right);
+                GUI.Label(new Rect(x, y, w, line), _headLeftContent, _left);
+                GUI.Label(new Rect(x, y, w, line), _headRightContent, _right);
                 y += line + gap;
 
                 // 링 버퍼의 가장 오래된 칸(_head)부터 그려서, 가장 최근 프레임이 오른쪽 끝에 오게 한다.
@@ -1231,24 +1288,26 @@ namespace DHS.Diagnostics
                                              new Rect((float)_head / HistoryLength, 0f, 1f, 1f));
                 y += graphHeight + gap;
 
-                GUI.Label(new Rect(x, y, w, line * SpikeLines), _spikeText, _left);
+                GUI.Label(new Rect(x, y, w, line * SpikeLines), _spikeContent, _left);
                 y += line * SpikeLines + gap;
 
                 float labelWidth = w * 0.52f, columnWidth = (w - labelWidth) / 3f, tableHeight = line * _tableLines;
                 // 수정 (2026-10-23): 줄마다 같은 높이로 네 칸을 따로 그린다 — 열 덩어리로 그리면 한글 열만 줄이 높아 어긋났다.
-                for (int i = 0; i < _cellLabels.Count; i++)
+                // 수정 (2026-10-26): string이 아니라 들고 있던 GUIContent를 넘긴다(매 프레임 할당 제거).
+                // 숫자 세 칸은 태그가 없으므로 richText를 끈 스타일로 그린다 — 태그 훑기를 건너뛴다.
+                for (int i = 0; i < _cellCount; i++)
                 {
                     float rowY = y + line * i;
                     GUI.Label(new Rect(x, rowY, labelWidth, line), _cellLabels[i], _left);
-                    GUI.Label(new Rect(x + labelWidth, rowY, columnWidth, line), _cellNows[i], _right);
-                    GUI.Label(new Rect(x + labelWidth + columnWidth, rowY, columnWidth, line), _cellAvgs[i], _right);
-                    GUI.Label(new Rect(x + labelWidth + columnWidth * 2f, rowY, columnWidth, line), _cellMaxs[i], _right);
+                    GUI.Label(new Rect(x + labelWidth, rowY, columnWidth, line), _cellNows[i], _rightPlain);
+                    GUI.Label(new Rect(x + labelWidth + columnWidth, rowY, columnWidth, line), _cellAvgs[i], _rightPlain);
+                    GUI.Label(new Rect(x + labelWidth + columnWidth * 2f, rowY, columnWidth, line), _cellMaxs[i], _rightPlain);
                 }
                 y += tableHeight + gap;
 
-                GUI.Label(new Rect(x, y, w, line * FooterLines), _footer, _left);
+                GUI.Label(new Rect(x, y, w, line * FooterLines), _footerContent, _left);
                 y += line * FooterLines;
-                GUI.Label(new Rect(x, y, w, line), _hint, _left);
+                GUI.Label(new Rect(x, y, w, line), _hintContent, _left);
             }
         }
 
