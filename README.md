@@ -179,6 +179,18 @@ Editor/
 위해서다. 한 파일에 `#if UNITY_EDITOR`로 섞어도 돌아가지만, asmdef를 쓰는 순간 그
 경계는 공짜로 얻을 수 있다.
 
+> ⚠️ **폴더에도 `.meta`가 있어야 한다** (1.2.1에서 고침). git 패키지는 읽기 전용이라
+> 유니티가 `.meta`를 스스로 만들 수 없고, 없으면 임포트마다 이렇게 경고한다:
+>
+> ```
+> Asset Packages/com.dhs.lagmeter/Runtime has no meta file,
+> but it's in an immutable folder. The asset will be ignored.
+> ```
+>
+> 스크립트 컴파일은 그래도 되지만(어셈블리는 정상적으로 생긴다) **경고가 매번 반복돼
+> 콘솔에서 진짜 에러를 가린다.** 유니티 자기 패키지들도 `Runtime.meta`를 함께 넣는다 —
+> 파일만 챙기고 폴더를 빠뜨리기 쉬운 자리다.
+
 파일 전체가 `#if UNITY_EDITOR || DEVELOPMENT_BUILD`라 **최종 빌드엔 아예 들어가지 않는다.**
 
 ## 도구가 렉을 만들면 안 된다
