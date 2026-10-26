@@ -22,6 +22,9 @@ namespace DHS.Diagnostics
     ///       프레임별 CSV와 한국어 요약(_summary.txt)을 저장한다. 요약 파일을 Claude에게 읽히면 숫자로 원인을 찾을 수 있다.</item>
     /// <item>(추가 2026-10-23) 메뉴 <c>Tools/렉 미터/Play 시작부터 녹화</c>를 켜 두면 F9를 누르기 전,
     ///       Play 첫 프레임부터 녹화한다 — 시작 직후 렉을 잡기 위해. 끌 때까지 Play마다 그렇게 한다.</item>
+    /// <item>(추가 2026-10-26) <see cref="screenshotKey"/>(F10)로 지금 화면을 PNG 한 장으로 남긴다 —
+    ///       표시판이 켜져 있으면 그 순간의 수치까지 그림 안에 같이 찍힌다. 영상을 켜는 것보다 싸고,
+    ///       "어 이상한데" 싶은 순간은 대개 한 장으로 충분하다.</item>
     /// <item>(추가 2026-10-23) 다른 창을 눌러 에디터가 게임을 멈췄다가 돌아온 프레임은 렉이 아니므로 기록에서 뺀다.</item>
     /// </list>
     ///
@@ -47,6 +50,9 @@ namespace DHS.Diagnostics
         [SerializeField] private Key toggleKey = Key.F8;
         [Tooltip("녹화 시작/저장.")]
         [SerializeField] private Key recordKey = Key.F9;
+        // 추가 생성 (2026-10-26)
+        [Tooltip("지금 화면을 PNG 한 장으로 저장. \"어 이상한데\" 싶은 순간의 증거를 남기는 용도. None이면 끈다.")]
+        [SerializeField] private Key screenshotKey = Key.F10;
 
         [Header("튄 프레임(렉) 판정")]
         [Tooltip("이 시간(ms)보다 긴 프레임만 렉 후보로 본다. 25 ms ≈ 40 FPS.")]
@@ -741,6 +747,52 @@ namespace DHS.Diagnostics
                 else StartRecording();
                 if (_visible) BuildTexts();
             }
+
+            // 추가 생성 (2026-10-26)
+            if (screenshotKey != Key.None && keyboard[screenshotKey].wasPressedThisFrame)
+                SaveScreenshot();
+        }
+
+        // 추가 생성 (2026-10-26)
+        /// <summary>
+        /// 지금 화면을 PNG 한 장으로 남긴다.
+        ///
+        /// ── 왜 영상이 아니라 한 장인가 ────────────────────────
+        /// 영상 녹화(Unity Recorder)는 창을 열고 버튼을 눌러야 하고, 프레임레이트를 고정해
+        /// <b>성능 수치를 왜곡</b>한다. 반면 "어 이상한데" 싶은 순간은 대개 <b>한 장으로 충분</b>하다 —
+        /// 문이 안 닫혔다, 칸이 튀었다, 서랍이 뚫렸다. 키 하나로 증거가 남는 쪽이 실제로 더 쓰인다.
+        ///
+        /// <b>표시판이 켜져 있으면 같이 찍힌다</b>(게임 뷰를 그대로 뜨므로). 그래서 그 순간의
+        /// FPS·튄 프레임·표가 그림 안에 함께 남아, 나중에 "이때 수치가 뭐였나"를 따로 안 찾아도 된다.
+        ///
+        /// ── 비동기다 ──────────────────────────────────────────
+        /// <see cref="ScreenCapture.CaptureScreenshot"/>은 프레임이 끝난 뒤에 파일을 쓴다.
+        /// 그래서 이 함수가 돌아온 직후에는 파일이 아직 없다 — 바로 열어보려 하면 안 된다.
+        ///
+        /// 저장 위치는 녹화 CSV와 <b>같은 폴더</b>다. 폴더를 새로 만들면 프로젝트마다
+        /// <c>.gitignore</c>에 한 줄을 또 넣어야 하는데, 이 폴더는 이미 빠져 있다.
+        /// 같은 세션의 CSV와 나란히 있어 시각을 맞춰 보기도 쉽다.
+        /// </summary>
+        private void SaveScreenshot()
+        {
+            try
+            {
+                string folder = CaptureFolder();
+                Directory.CreateDirectory(folder);
+                string name = $"shot_{DateTime.Now:yyyyMMdd_HHmmss}.png";
+                ScreenCapture.CaptureScreenshot(Path.Combine(folder, name));
+
+                _savedNotice = $"찍었다: ProfilerCaptures/{name}";
+                _savedNoticeUntil = Time.unscaledTime + 6f;
+                if (_visible) BuildTexts();
+
+                Debug.Log($"[LagMeter] 화면을 저장했다 — {Path.Combine(folder, name)} (프레임이 끝난 뒤에 쓰인다)");
+            }
+            catch (Exception e)
+            {
+                // 측정 도구가 게임을 멈추게 하면 안 된다 — 못 찍으면 알리고 넘어간다.
+                Debug.LogWarning($"[LagMeter] 화면을 저장하지 못했다 — {e.GetType().Name}: {e.Message}");
+            }
         }
 
         /// <param name="fromStart">(추가 2026-10-23) Play 첫 프레임부터 녹화하는가 — 요약에 시작 구간을 따로 적는다.</param>
@@ -1048,7 +1100,11 @@ namespace DHS.Diagnostics
             else if (_savedNotice != null && Time.unscaledTime < _savedNoticeUntil)
                 _hint = $"<color={Green}>{_savedNotice}</color>";
             else
-                _hint = $"<color={Grey}>{toggleKey} 숨기기 · {recordKey} 녹화 시작(파일로 저장)</color>";
+            {
+                // 수정 (2026-10-26): 스크린샷 키도 안내에 넣는다 — 키가 늘었는데 안내에 없으면 아무도 안 쓴다.
+                string shot = screenshotKey != Key.None ? $" · {screenshotKey} 화면 한 장" : "";
+                _hint = $"<color={Grey}>{toggleKey} 숨기기 · {recordKey} 녹화 시작(파일로 저장){shot}</color>";
+            }
         }
 
         private string CountText(int row) =>
