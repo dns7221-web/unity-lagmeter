@@ -234,3 +234,21 @@ LagMeter.Update   평균 0.02ms   ← 거의 0
 
 웹스윙 게임(Momentum) 작업 중에 만들었고, 영안실 호러 게임(Morgue Room Horror)에
 가져다 쓰면서 **프로젝트 전용 코드를 걷어내고** 패키지로 떼어냈다.
+
+## 테스트 (1.3.2)
+
+`Tests/Runtime`에 플레이 모드 테스트가 있다. 쓰는 프로젝트의 `Packages/manifest.json`에
+`"testables": ["com.dhs.lagmeter"]`를 넣으면 Test Runner(Window ▸ General ▸ Test Runner)의 PlayMode 탭에 보인다.
+
+| 테스트 | 확인하는 것 |
+|---|---|
+| Play 시작 때 저절로 생김 | 씬에 넣지 않아도 생기고, `DontDestroyOnLoad`로 씬이 바뀌어도 남는다 |
+| 120프레임 오류 없음 | 키보드가 없는 배치 모드·CI에서도 예외 없이 잰다 |
+| Play 시작부터 녹화 → 저장 | 끝날 때 CSV·요약이 저장되고, `RegisterCounter`로 등록한 값이 CSV에 **한 열만** 실린다(같은 키를 일부러 두 번 등록) |
+
+렉 미터는 MonoBehaviour 하나라 계산이 private에 들어 있다. 잘 돌고 있는 코드를 테스트 때문에 뜯어고치지 않고,
+**밖에서 보이는 약속**만 확인한다. 테스트가 만든 녹화 파일은 테스트가 지운다.
+
+## 라이선스
+
+MIT — `LICENSE.md` 참고.
